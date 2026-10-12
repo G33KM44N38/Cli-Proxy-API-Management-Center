@@ -163,3 +163,20 @@ Issues and PRs are welcome. Please include:
 ## License
 
 MIT
+
+## Fleet fork deployment
+
+The MSI management panel uses `G33KM44N38/Cli-Proxy-API-Management-Center`,
+branch `feat/quota-auto-refresh`, based on v1.23.1 for the existing v0 management
+API. Visible enabled quotas refresh once per page visit. The dashboard navigation
+cards and Quick Start route/sidebar entry are removed.
+
+The engine fork is `G33KM44N38/CLIProxyAPI`. MSI and Mac currently run the
+unmodified CLIProxyAPI 7.3.4 engine binaries; creating that fork does not replace
+the deployed engine.
+
+Build with `bun install --frozen-lockfile` and `bun run build`. Deploy the generated
+single-file `dist/index.html` as the MSI management panel, retaining a backup and
+verifying its SHA-256 through HTTP. Keep panel auto-update disabled. Machine
+identity verification, Mac failover setup and private credentials are owned by
+the Fleet repository; see its README section "Forks et fallback Mac".
