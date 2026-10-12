@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFilesApi } from '@/services/api';
-import { useAuthStore, useConfigStore, useModelsStore } from '@/stores';
+import { useAuthStore, useConfigStore, useModelsStore, useQuotaStore } from '@/stores';
 import { useApiKeysForModels } from '@/hooks/useApiKeysForModels';
 import { useProviderRecentRequests } from '@/components/providers/hooks/useProviderRecentRequests';
 import {
@@ -127,16 +127,35 @@ export function useDashboardOverview() {
   });
 
   const [authFiles, setAuthFiles] = useState<AuthFileItem[] | null>(null);
+  const [authFilesError, setAuthFilesError] = useState(false);
+  const [filesGeneration, setFilesGeneration] = useState<number | null>(null);
+  const sessionGeneration = useQuotaStore((state) => state.cacheGeneration);
+  const authRequest = useRef(0);
 
   const loadAuthFiles = useCallback(async () => {
-    if (!connected) return;
+    const request = ++authRequest.current;
+    if (!connected) {
+      setAuthFiles(null);
+      setAuthFilesError(false);
+      setFilesGeneration(null);
+      return;
+    }
+    const isCurrent = () =>
+      request === authRequest.current &&
+      sessionGeneration === useQuotaStore.getState().cacheGeneration;
     try {
       const response = await authFilesApi.list();
+      if (!isCurrent()) return;
       setAuthFiles(response.files);
+      setAuthFilesError(false);
+      setFilesGeneration(sessionGeneration);
     } catch {
+      if (!isCurrent()) return;
       setAuthFiles(null);
+      setAuthFilesError(true);
+      setFilesGeneration(null);
     }
-  }, [connected]);
+  }, [connected, sessionGeneration]);
 
   const loadModels = useCallback(async () => {
     if (!connected || !apiBase) return;
@@ -149,10 +168,16 @@ export function useDashboardOverview() {
   }, [connected, apiBase, resolveApiKeysForModels, fetchModelsFromStore]);
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected) {
+      void loadAuthFiles();
+      return;
+    }
     void fetchConfig().catch(() => undefined);
     void loadAuthFiles();
     void loadModels();
+    return () => {
+      authRequest.current += 1;
+    };
   }, [connected, fetchConfig, loadAuthFiles, loadModels]);
 
   const refresh = useCallback(async () => {
@@ -290,6 +315,8 @@ export function useDashboardOverview() {
     traffic,
     providers,
     credentials,
+    authFiles: filesGeneration === sessionGeneration ? authFiles : null,
+    authFilesError,
     refresh,
   };
 }

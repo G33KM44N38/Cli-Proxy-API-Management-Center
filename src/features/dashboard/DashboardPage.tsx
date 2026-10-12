@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { formatCompactNumber, formatDateValue, formatPercent } from '@/utils/format';
 import { useDashboardOverview } from './hooks/useDashboardOverview';
+import { AccountQuotas } from './components/AccountQuotas';
 import { LiveWire } from './components/LiveWire';
 import { Meter } from './components/Meter';
 import { Sparkline } from './components/Sparkline';
@@ -32,8 +33,18 @@ export function DashboardPage() {
   const serverVersion = useAuthStore((state) => state.serverVersion);
   const serverBuildDate = useAuthStore((state) => state.serverBuildDate);
 
-  const { connectionStatus, connected, config, counts, traffic, providers, credentials, refresh } =
-    useDashboardOverview();
+  const {
+    connectionStatus,
+    connected,
+    config,
+    counts,
+    traffic,
+    providers,
+    credentials,
+    authFiles,
+    authFilesError,
+    refresh,
+  } = useDashboardOverview();
 
   useHeaderRefresh(refresh, connected);
 
@@ -262,6 +273,8 @@ export function DashboardPage() {
         </div>
       </section>
 
+      <AccountQuotas files={authFiles} connected={connected} listError={authFilesError} />
+
       {/* ---------- KPI ---------- */}
       <section className={styles.statsRow} ref={statsRef} aria-label={t('dashboard.stats_aria')}>
         {statTiles.map((tile) => (
@@ -468,7 +481,6 @@ export function DashboardPage() {
           </Link>
         </div>
       </section>
-
     </div>
   );
 }

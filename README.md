@@ -168,7 +168,8 @@ MIT
 
 The MSI management panel uses `G33KM44N38/Cli-Proxy-API-Management-Center`,
 branch `feat/quota-auto-refresh`, based on v1.23.1 for the existing v0 management
-API. Visible enabled quotas refresh once per page visit. The dashboard navigation
+API. Account quotas are displayed on the home screen and the quota page. Visible enabled
+quotas refresh once per page visit, with manual refresh controls. The dashboard navigation
 cards and Quick Start route/sidebar entry are removed.
 
 The engine fork is `G33KM44N38/CLIProxyAPI`. MSI and Mac currently run the
