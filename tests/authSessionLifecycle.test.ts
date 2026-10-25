@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { AxiosError, type AxiosInstance, type AxiosResponse } from 'axios';
 import { apiClient } from '@/services/api/client';
 import { configApi } from '@/services/api/config';
 import { obfuscatedStorage } from '@/services/storage/secureStorage';
@@ -55,7 +56,6 @@ beforeEach(() => {
   });
   useAuthStore.getState().logout();
   memory.clear();
-  useAuthStore.setState({ rememberPassword: false });
   transport = spyOn(configApi, 'getConfig').mockResolvedValue({ debug: true });
 });
 
@@ -173,6 +173,107 @@ describe('authentication session lifecycle with real stores and storage', () => 
         base: 'https://second.invalid/v8/management',
         authorization: 'Bearer fixture-second-only',
       });
+    });
+  }
+
+  test('two logins with identical credentials still invalidate the older attempt', async () => {
+    const first = deferred();
+    const second = deferred();
+    transport.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const oldLogin = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+    const newLogin = useAuthStore.getState().login(credentials);
+    first.resolve({ debug: false });
+    expect(await oldLogin).toBeInstanceOf(DOMException);
+    expect(useAuthStore.getState().connectionStatus).toBe('connecting');
+    second.resolve({ debug: true });
+    await newLogin;
+    expect(useAuthStore.getState()).toMatchObject({
+      isAuthenticated: true,
+      managementKey: 'fixture-first-only',
+      connectionStatus: 'connected',
+    });
+  });
+
+  for (const fails of [false, true]) {
+    test(`checkAuth cannot undo logout on delayed ${fails ? 'failure' : 'success'}`, async () => {
+      await useAuthStore.getState().login(credentials);
+      useConfigStore.getState().clearCache();
+      const response = deferred();
+      transport.mockReturnValueOnce(response.promise);
+      const pending = useAuthStore.getState().checkAuth();
+      useAuthStore.getState().logout();
+      if (fails) response.reject(new Error('fixture check failure'));
+      else response.resolve({ debug: false });
+      expect(await pending).toBe(false);
+      expect(useAuthStore.getState()).toMatchObject({
+        isAuthenticated: false,
+        managementKey: '',
+        connectionStatus: 'disconnected',
+      });
+    });
+  }
+
+  for (const status of [200, 401]) {
+    test(`obsolete transport response (${status}) cannot affect the new session`, async () => {
+      transport.mockRestore();
+      const instance = Reflect.get(apiClient, 'instance') as AxiosInstance;
+      const previousAdapter = instance.defaults.adapter;
+      const events: string[] = [];
+      const target = new EventTarget();
+      target.addEventListener('unauthorized', () => useAuthStore.getState().logout());
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: {
+          location: new URL('https://ui.invalid'),
+          dispatchEvent: (event: Event) => {
+            events.push(event.type);
+            return target.dispatchEvent(event);
+          },
+        },
+      });
+      let started!: () => void;
+      const dispatched = new Promise<void>((resolve) => { started = resolve; });
+      let deliver!: () => void;
+      instance.defaults.adapter = (config) => {
+        if (config.headers.Authorization === 'Bearer fixture-second-only') {
+          return Promise.resolve({ data: { debug: true }, status: 200, statusText: 'OK', headers: {}, config });
+        }
+        return new Promise<AxiosResponse>((resolve, reject) => {
+          deliver = () => {
+            const response: AxiosResponse = {
+              config,
+              status,
+              statusText: String(status),
+              data: { debug: false },
+              headers: { 'x-cpa-version': 'obsolete', 'x-cpa-support-plugin': 'true' },
+            };
+            if (status === 401) reject(new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', config, undefined, response));
+            else resolve(response);
+          };
+          started();
+        });
+      };
+      try {
+        const oldLogin = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+        await dispatched;
+        await useAuthStore.getState().login({
+          apiBase: 'https://second.invalid',
+          managementKey: 'fixture-second-only',
+          rememberPassword: false,
+        });
+        deliver();
+        await oldLogin;
+        expect(useAuthStore.getState()).toMatchObject({
+          isAuthenticated: true,
+          apiBase: 'https://second.invalid',
+          managementKey: 'fixture-second-only',
+          connectionStatus: 'connected',
+        });
+        expect(events).toEqual([]);
+        expect(useConfigStore.getState().config?.debug).toBe(true);
+      } finally {
+        instance.defaults.adapter = previousAdapter;
+      }
     });
   }
 
