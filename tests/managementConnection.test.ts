@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { computeApiUrl, normalizeApiBase } from '../src/utils/connection';
+import {
+  computeApiUrl,
+  detectApiBaseFromLocation,
+  normalizeApiBase,
+} from '../src/utils/connection';
 import { resolvePluginAssetURL } from '../src/features/plugins/pluginResources';
 
 describe('v8-only management connections', () => {
@@ -27,6 +31,24 @@ describe('v8-only management connections', () => {
 
   test('does not create a URL for empty input', () => {
     expect(computeApiUrl('  ')).toBe('');
+  });
+
+  test.each([
+    ['http://proxy.example:8317', 'https://proxy.example:8317'],
+    ['http://127.0.0.1:8317', 'http://127.0.0.1:8317'],
+    ['http://[::1]:8317', 'http://[::1]:8317'],
+  ])('detects a safe login address from %s', (location, expected) => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    try {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: { location: new URL(location) },
+      });
+      expect(detectApiBaseFromLocation()).toBe(expected);
+    } finally {
+      if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+      else Reflect.deleteProperty(globalThis, 'window');
+    }
   });
 
   test('does not silently adapt a legacy management URL', () => {

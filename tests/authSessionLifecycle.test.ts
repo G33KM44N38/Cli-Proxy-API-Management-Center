@@ -133,7 +133,10 @@ describe('authentication session lifecycle with real stores and storage', () => 
     test(`a deferred login cannot change logout state (${fails ? 'failure' : 'success'})`, async () => {
       const response = deferred();
       transport.mockReturnValueOnce(response.promise);
-      const pending = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+      const pending = useAuthStore
+        .getState()
+        .login(credentials)
+        .catch((error: unknown) => error);
       useAuthStore.getState().logout();
       if (fails) response.reject(new Error('fixture failure'));
       else response.resolve({ debug: true });
@@ -152,7 +155,10 @@ describe('authentication session lifecycle with real stores and storage', () => 
     test(`the newest login wins over an older ${fails ? 'failure' : 'success'}`, async () => {
       const first = deferred();
       transport.mockReturnValueOnce(first.promise);
-      const oldLogin = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+      const oldLogin = useAuthStore
+        .getState()
+        .login(credentials)
+        .catch((error: unknown) => error);
       await useAuthStore.getState().login({
         apiBase: 'https://second.invalid',
         managementKey: 'fixture-second-only',
@@ -180,7 +186,10 @@ describe('authentication session lifecycle with real stores and storage', () => 
     const first = deferred();
     const second = deferred();
     transport.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    const oldLogin = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+    const oldLogin = useAuthStore
+      .getState()
+      .login(credentials)
+      .catch((error: unknown) => error);
     const newLogin = useAuthStore.getState().login(credentials);
     first.resolve({ debug: false });
     expect(await oldLogin).toBeInstanceOf(DOMException);
@@ -213,8 +222,14 @@ describe('authentication session lifecycle with real stores and storage', () => 
     });
   }
 
-  for (const status of [200, 401]) {
-    test(`obsolete transport response (${status}) cannot affect the new session`, async () => {
+  test.each([
+    [200, 'https://second.invalid', 'fixture-second-only'],
+    [401, 'https://second.invalid', 'fixture-second-only'],
+    [200, 'https://first.invalid/gateway', 'fixture-first-only'],
+    [401, 'https://first.invalid/gateway', 'fixture-first-only'],
+  ])(
+    'obsolete transport response (%s) cannot affect new session %s',
+    async (status, apiBase, managementKey) => {
       transport.mockRestore();
       const instance = Reflect.get(apiClient, 'instance') as AxiosInstance;
       const previousAdapter = instance.defaults.adapter;
@@ -232,11 +247,20 @@ describe('authentication session lifecycle with real stores and storage', () => 
         },
       });
       let started!: () => void;
-      const dispatched = new Promise<void>((resolve) => { started = resolve; });
+      const dispatched = new Promise<void>((resolve) => {
+        started = resolve;
+      });
       let deliver!: () => void;
+      let requestCount = 0;
       instance.defaults.adapter = (config) => {
-        if (config.headers.Authorization === 'Bearer fixture-second-only') {
-          return Promise.resolve({ data: { debug: true }, status: 200, statusText: 'OK', headers: {}, config });
+        if (requestCount++ > 0) {
+          return Promise.resolve({
+            data: { observability: { logs: { debug: true } } },
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config,
+          });
         }
         return new Promise<AxiosResponse>((resolve, reject) => {
           deliver = () => {
@@ -244,29 +268,35 @@ describe('authentication session lifecycle with real stores and storage', () => 
               config,
               status,
               statusText: String(status),
-              data: { debug: false },
+              data: { observability: { logs: { debug: false } } },
               headers: { 'x-cpa-version': 'obsolete', 'x-cpa-support-plugin': 'true' },
             };
-            if (status === 401) reject(new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', config, undefined, response));
+            if (status === 401)
+              reject(
+                new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', config, undefined, response)
+              );
             else resolve(response);
           };
           started();
         });
       };
       try {
-        const oldLogin = useAuthStore.getState().login(credentials).catch((error: unknown) => error);
+        const oldLogin = useAuthStore
+          .getState()
+          .login(credentials)
+          .catch((error: unknown) => error);
         await dispatched;
         await useAuthStore.getState().login({
-          apiBase: 'https://second.invalid',
-          managementKey: 'fixture-second-only',
+          apiBase,
+          managementKey,
           rememberPassword: false,
         });
         deliver();
         await oldLogin;
         expect(useAuthStore.getState()).toMatchObject({
           isAuthenticated: true,
-          apiBase: 'https://second.invalid',
-          managementKey: 'fixture-second-only',
+          apiBase,
+          managementKey,
           connectionStatus: 'connected',
         });
         expect(events).toEqual([]);
@@ -274,13 +304,42 @@ describe('authentication session lifecycle with real stores and storage', () => 
       } finally {
         instance.defaults.adapter = previousAdapter;
       }
-    });
-  }
+    }
+  );
 
   test('failed current login clears credentials from the API client', async () => {
     transport.mockRejectedValueOnce(new Error('fixture failed login'));
-    await expect(useAuthStore.getState().login(credentials)).rejects.toThrow('fixture failed login');
+    await expect(useAuthStore.getState().login(credentials)).rejects.toThrow(
+      'fixture failed login'
+    );
     expect(useAuthStore.getState().connectionStatus).toBe('error');
     expect(await readClientCredentials()).toEqual({ base: '', authorization: null });
+  });
+
+  test('a current transport 401 still emits the unauthorized event', async () => {
+    await useAuthStore.getState().login(credentials);
+    const events: string[] = [];
+    const dispatch = spyOn(window, 'dispatchEvent').mockImplementation((event) => {
+      events.push(event.type);
+      return true;
+    });
+    try {
+      await expect(
+        apiClient.get('/fixture-only', {
+          adapter: async (config) => {
+            throw new AxiosError('Unauthorized', 'ERR_BAD_REQUEST', config, undefined, {
+              data: { error: 'fixture unauthorized' },
+              status: 401,
+              statusText: 'Unauthorized',
+              headers: {},
+              config,
+            });
+          },
+        })
+      ).rejects.toHaveProperty('status', 401);
+      expect(events).toEqual(['unauthorized']);
+    } finally {
+      dispatch.mockRestore();
+    }
   });
 });

@@ -28,6 +28,12 @@ interface AuthStoreState extends AuthState {
 }
 
 let restoreSessionPromise: Promise<boolean> | null = null;
+let authAttempt = 0;
+const legacyCredentialKeys = ['apiBase', 'apiUrl', 'managementKey'];
+
+const removeLegacyCredentials = () => {
+  legacyCredentialKeys.forEach((key) => obfuscatedStorage.removeItem(key));
+};
 
 export const useAuthStore = create<AuthStoreState>()(
   persist(
@@ -47,8 +53,7 @@ export const useAuthStore = create<AuthStoreState>()(
         if (restoreSessionPromise) return restoreSessionPromise;
 
         restoreSessionPromise = (async () => {
-          obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
-
+          const hasSavedAuth = obfuscatedStorage.getItem(STORAGE_KEY_AUTH) !== null;
           const wasLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
           const legacyBase =
             obfuscatedStorage.getItem<string>('apiBase') ||
@@ -57,17 +62,18 @@ export const useAuthStore = create<AuthStoreState>()(
 
           const { apiBase, managementKey, rememberPassword } = get();
           const resolvedBase = normalizeApiBase(
-            apiBase || legacyBase || detectApiBaseFromLocation()
+            apiBase || (!hasSavedAuth && legacyBase) || detectApiBaseFromLocation()
           );
-          const resolvedKey = managementKey || legacyKey || '';
+          const resolvedKey = managementKey || (!hasSavedAuth && legacyKey) || '';
           const resolvedRememberPassword =
-            rememberPassword || Boolean(managementKey) || Boolean(legacyKey);
+            rememberPassword || (!hasSavedAuth && Boolean(legacyKey));
 
           set({
             apiBase: resolvedBase,
             managementKey: resolvedKey,
             rememberPassword: resolvedRememberPassword,
           });
+          removeLegacyCredentials();
           apiClient.setConfig({ apiBase: resolvedBase, managementKey: resolvedKey });
 
           if (wasLoggedIn && resolvedBase && resolvedKey) {
@@ -92,21 +98,32 @@ export const useAuthStore = create<AuthStoreState>()(
 
       // 登录
       login: async (credentials) => {
+        const attempt = ++authAttempt;
         const apiBase = normalizeApiBase(credentials.apiBase);
         const managementKey = credentials.managementKey.trim();
         const rememberPassword = credentials.rememberPassword ?? get().rememberPassword ?? false;
+        let revision = apiClient.getConnectionRevision();
+        const isCurrent = () =>
+          attempt === authAttempt && revision === apiClient.getConnectionRevision();
 
         try {
           set({
+            isAuthenticated: false,
+            managementKey: '',
+            rememberPassword,
             connectionStatus: 'connecting',
             serverVersion: null,
             serverBuildDate: null,
             supportsPlugin: false,
           });
+          removeLegacyCredentials();
+          localStorage.removeItem('isLoggedIn');
           useConfigStore.getState().clearCache();
           useModelsStore.getState().clearCache();
           useQuotaStore.getState().clearQuotaCache();
 
+          // A new attempt must invalidate old responses even when credentials are unchanged.
+          apiClient.setConfig({ apiBase: '', managementKey: '' });
           // 配置 API 客户端
           apiClient.setConfig({
             apiBase,
@@ -114,19 +131,23 @@ export const useAuthStore = create<AuthStoreState>()(
           });
 
           // 测试连接 - 获取配置。只在 v8 路由不存在时诊断旧版后端。
-          const revision = apiClient.getConnectionRevision();
+          revision = apiClient.getConnectionRevision();
           try {
             await useConfigStore.getState().fetchConfig(true);
           } catch (error) {
             if (
               (error as { status?: number })?.status === 404 &&
-              revision === apiClient.getConnectionRevision() &&
+              isCurrent() &&
               (await probeLegacyBackend(apiBase, managementKey)) &&
-              revision === apiClient.getConnectionRevision()
+              isCurrent()
             ) {
               throw new LegacyBackendError();
             }
             throw error;
+          }
+
+          if (!isCurrent()) {
+            throw new DOMException('The management connection changed.', 'AbortError');
           }
 
           // 登录成功
@@ -143,14 +164,19 @@ export const useAuthStore = create<AuthStoreState>()(
             localStorage.removeItem('isLoggedIn');
           }
         } catch (error: unknown) {
-          set({ connectionStatus: 'error' });
+          if (isCurrent()) {
+            apiClient.setConfig({ apiBase: '', managementKey: '' });
+            set({ isAuthenticated: false, managementKey: '', connectionStatus: 'error' });
+          }
           throw error;
         }
       },
 
       // 登出
       logout: () => {
+        authAttempt += 1;
         restoreSessionPromise = null;
+        removeLegacyCredentials();
         apiClient.setConfig({ apiBase: '', managementKey: '' });
         useConfigStore.getState().clearCache();
         useModelsStore.getState().clearCache();
@@ -159,6 +185,7 @@ export const useAuthStore = create<AuthStoreState>()(
           isAuthenticated: false,
           apiBase: '',
           managementKey: '',
+          rememberPassword: false,
           serverVersion: null,
           serverBuildDate: null,
           supportsPlugin: false,
@@ -169,6 +196,7 @@ export const useAuthStore = create<AuthStoreState>()(
 
       // 检查认证状态
       checkAuth: async () => {
+        const attempt = authAttempt;
         const { managementKey, apiBase } = get();
 
         if (!managementKey || !apiBase) {
@@ -178,10 +206,14 @@ export const useAuthStore = create<AuthStoreState>()(
         try {
           // 重新配置客户端
           apiClient.setConfig({ apiBase, managementKey });
+          const revision = apiClient.getConnectionRevision();
           set({ supportsPlugin: false });
 
           // 验证连接
           await useConfigStore.getState().fetchConfig();
+
+          if (attempt !== authAttempt || revision !== apiClient.getConnectionRevision())
+            return false;
 
           set({
             isAuthenticated: true,
@@ -190,6 +222,7 @@ export const useAuthStore = create<AuthStoreState>()(
 
           return true;
         } catch {
+          if (attempt !== authAttempt) return false;
           set({
             isAuthenticated: false,
             connectionStatus: 'error',
